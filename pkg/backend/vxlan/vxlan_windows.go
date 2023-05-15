@@ -157,6 +157,15 @@ func (be *VXLANBackend) RegisterNetwork(ctx context.Context, wg *sync.WaitGroup,
 	dev.directRouting = cfg.DirectRouting
 	dev.macPrefix = cfg.MacPrefix
 
+	err = be.subnetMgr.AddNodeAnnotations(ctx, subnetAttrs)
+	switch err {
+	case nil:
+	case context.Canceled, context.DeadlineExceeded:
+		return nil, err
+	default:
+		return nil, fmt.Errorf("failed to add node annotations: %v", err)
+	}
+
 	network, err := newNetwork(be.subnetMgr, be.extIface, dev, ip.IP4Net{}, lease)
 	if err != nil {
 		return nil, err
@@ -194,6 +203,16 @@ func (be *VXLANBackend) RegisterNetwork(ctx context.Context, wg *sync.WaitGroup,
 		return nil, err
 	}
 	network.SubnetLease = lease
+
+	err = be.subnetMgr.AddNodeAnnotations(ctx, subnetAttrs)
+	switch err {
+	case nil:
+	case context.Canceled, context.DeadlineExceeded:
+		return nil, err
+	default:
+		return nil, fmt.Errorf("failed to add node annotations: %v", err)
+	}
+
 	return network, nil
 }
 

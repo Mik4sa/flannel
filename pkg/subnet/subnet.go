@@ -118,6 +118,7 @@ type Manager interface {
 	GetNetworkConfig(ctx context.Context) (*Config, error)
 	HandleSubnetFile(path string, config *Config, ipMasq bool, sn ip.IP4Net, ipv6sn ip.IP6Net, mtu int) error
 	AcquireLease(ctx context.Context, attrs *lease.LeaseAttrs) (*lease.Lease, error)
+	AddNodeAnnotations(ctx context.Context, attrs *lease.LeaseAttrs) error
 	RenewLease(ctx context.Context, lease *lease.Lease) error
 	WatchLease(ctx context.Context, sn ip.IP4Net, sn6 ip.IP6Net, receiver chan []lease.LeaseWatchResult) error
 	WatchLeases(ctx context.Context, receiver chan []lease.LeaseWatchResult) error

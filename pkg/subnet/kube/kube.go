@@ -306,10 +306,61 @@ func (ksm *kubeSubnetManager) GetNetworkConfig(ctx context.Context) (*subnet.Con
 	return ksm.subnetConf, nil
 }
 
-// AcquireLease adds the flannel specific node annotations (defined in the struct LeaseAttrs) and returns a lease
-// with important information for the backend, such as the subnet. This function is called once by the backend when
-// registering
+// AcquireLease returns a lease with important information for the backend, such as the subnet.
+// This function is called once by the backend when registering
 func (ksm *kubeSubnetManager) AcquireLease(ctx context.Context, attrs *lease.LeaseAttrs) (*lease.Lease, error) {
+	config, err := ksm.GetNetworkConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var cidr, ipv6Cidr *net.IPNet
+	if config.Network.Empty() == false {
+		cidr = config.Network.ToIPNet()
+	} else if config.IPv6Network.Empty() == false {
+		ipv6Cidr = config.IPv6Network.ToIPNet()
+	}
+
+	lease := &subnet.Lease{
+		Attrs:      *attrs,
+		Expiration: time.Now().Add(24 * time.Hour),
+	}
+	if cidr != nil && ksm.enableIPv4 {
+		ipnet := ip.FromIPNet(cidr)
+		net, err := ksm.subnetConf.GetFlannelNetwork(&ipnet)
+		if err != nil {
+			return nil, err
+		}
+		// this check is still needed when we use the flannel configuration and not the MultiClusterCIDR API
+		if !containsCIDR(net.ToIPNet(), cidr) {
+			return nil, fmt.Errorf("subnet %q specified in the flannel net config doesn't contain %q PodCIDR of the %q node", ksm.subnetConf.Network, cidr, ksm.nodeName)
+		}
+
+		lease.Subnet = ip.FromIPNet(cidr)
+	}
+	if ipv6Cidr != nil {
+		ip6net := ip.FromIP6Net(ipv6Cidr)
+		net, err := ksm.subnetConf.GetFlannelIPv6Network(&ip6net)
+		if err != nil {
+			return nil, err
+		}
+		// this check is still needed when we use the flannel configuration and not the MultiClusterCIDR API
+		if !containsCIDR(net.ToIPNet(), ipv6Cidr) {
+			return nil, fmt.Errorf("subnet %q specified in the flannel net config doesn't contain %q IPv6 PodCIDR of the %q node", net, ipv6Cidr, ksm.nodeName)
+		}
+
+		lease.IPv6Subnet = ip.FromIP6Net(ipv6Cidr)
+	}
+	//TODO - only vxlan, host-gw and wireguard backends support dual stack now.
+	if attrs.BackendType != "vxlan" && attrs.BackendType != "host-gw" && attrs.BackendType != "wireguard" {
+		lease.EnableIPv4 = true
+		lease.EnableIPv6 = false
+	}
+	return lease, nil
+}
+
+// SaveLease adds the flannel specific node annotations (defined in the struct LeaseAttrs)
+func (ksm *kubeSubnetManager) AddNodeAnnotations(ctx context.Context, attrs *lease.LeaseAttrs) error {
 	var cachedNode *v1.Node
 	var err error
 	if ksm.disableNodeInformer {
@@ -318,51 +369,20 @@ func (ksm *kubeSubnetManager) AcquireLease(ctx context.Context, attrs *lease.Lea
 		cachedNode, err = ksm.nodeStore.Get(ksm.nodeName)
 	}
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	n := cachedNode.DeepCopy()
-	if n.Spec.PodCIDR == "" {
-		return nil, fmt.Errorf("node %q pod cidr not assigned", ksm.nodeName)
-	}
 
 	var bd, v6Bd []byte
 	bd, err = attrs.BackendData.MarshalJSON()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	v6Bd, err = attrs.BackendV6Data.MarshalJSON()
 	if err != nil {
-		return nil, err
-	}
-
-	var cidr, ipv6Cidr *net.IPNet
-	switch {
-	case len(n.Spec.PodCIDRs) == 0:
-		_, parseCidr, err := net.ParseCIDR(n.Spec.PodCIDR)
-		if err != nil {
-			return nil, err
-		}
-		if len(parseCidr.IP) == net.IPv4len {
-			cidr = parseCidr
-		} else if len(parseCidr.IP) == net.IPv6len {
-			ipv6Cidr = parseCidr
-		}
-	case len(n.Spec.PodCIDRs) < 3:
-		for _, podCidr := range n.Spec.PodCIDRs {
-			_, parseCidr, err := net.ParseCIDR(podCidr)
-			if err != nil {
-				return nil, err
-			}
-			if len(parseCidr.IP) == net.IPv4len {
-				cidr = parseCidr
-			} else if len(parseCidr.IP) == net.IPv6len {
-				ipv6Cidr = parseCidr
-			}
-		}
-	default:
-		return nil, fmt.Errorf("node %q pod cidrs should be IPv4/IPv6 only or dualstack", ksm.nodeName)
+		return err
 	}
 
 	if (n.Annotations[ksm.annotations.BackendData] != string(bd) ||
@@ -410,61 +430,26 @@ func (ksm *kubeSubnetManager) AcquireLease(ctx context.Context, attrs *lease.Lea
 
 		oldData, err := json.Marshal(cachedNode)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		newData, err := json.Marshal(n)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		patchBytes, err := strategicpatch.CreateTwoWayMergePatch(oldData, newData, v1.Node{})
 		if err != nil {
-			return nil, fmt.Errorf("failed to create patch for node %q: %v", ksm.nodeName, err)
+			return fmt.Errorf("failed to create patch for node %q: %v", ksm.nodeName, err)
 		}
 
 		_, err = ksm.client.CoreV1().Nodes().Patch(ctx, ksm.nodeName, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{}, "status")
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 
-	lease := &lease.Lease{
-		Attrs:      *attrs,
-		Expiration: time.Now().Add(24 * time.Hour),
-	}
-	if cidr != nil && ksm.enableIPv4 {
-		ipnet := ip.FromIPNet(cidr)
-		net, err := ksm.subnetConf.GetFlannelNetwork(&ipnet)
-		if err != nil {
-			return nil, err
-		}
-		// this check is still needed when we use the flannel configuration and not the MultiClusterCIDR API
-		if !containsCIDR(net.ToIPNet(), cidr) {
-			return nil, fmt.Errorf("subnet %q specified in the flannel net config doesn't contain %q PodCIDR of the %q node", ksm.subnetConf.Network, cidr, ksm.nodeName)
-		}
-
-		lease.Subnet = ip.FromIPNet(cidr)
-	}
-	if ipv6Cidr != nil {
-		ip6net := ip.FromIP6Net(ipv6Cidr)
-		net, err := ksm.subnetConf.GetFlannelIPv6Network(&ip6net)
-		if err != nil {
-			return nil, err
-		}
-		// this check is still needed when we use the flannel configuration and not the MultiClusterCIDR API
-		if !containsCIDR(net.ToIPNet(), ipv6Cidr) {
-			return nil, fmt.Errorf("subnet %q specified in the flannel net config doesn't contain %q IPv6 PodCIDR of the %q node", net, ipv6Cidr, ksm.nodeName)
-		}
-
-		lease.IPv6Subnet = ip.FromIP6Net(ipv6Cidr)
-	}
-	//TODO - only vxlan, host-gw and wireguard backends support dual stack now.
-	if attrs.BackendType != "vxlan" && attrs.BackendType != "host-gw" && attrs.BackendType != "wireguard" {
-		lease.EnableIPv4 = true
-		lease.EnableIPv6 = false
-	}
-	return lease, nil
+	return nil
 }
 
 // WatchLeases waits for the kubeSubnetManager to provide an event in case something relevant changed in the node data

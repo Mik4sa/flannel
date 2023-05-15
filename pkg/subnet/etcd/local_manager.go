@@ -117,6 +117,10 @@ func (m *LocalManager) AcquireLease(ctx context.Context, attrs *lease.LeaseAttrs
 	return nil, errors.New("Max retries reached trying to acquire a subnet")
 }
 
+func (m *LocalManager) AddNodeAnnotations(ctx context.Context, attrs *lease.LeaseAttrs) error {
+	return nil
+}
+
 func findLeaseByIP(leases []lease.Lease, pubIP ip.IP4) *lease.Lease {
 	for _, l := range leases {
 		if pubIP == l.Attrs.PublicIP {
